@@ -1,0 +1,347 @@
+/*
+ * Title               : bwutil
+ * Last modified date  : 16.12.2019
+ * Author              : jumation.com
+ * Description         : Compares ingress and egress byte counters for each
+ *                       interface specified as a script argument with previous
+ *                       readings stored in a file. If calculated bandwidth
+ *                       utilization for a time-period is higher than the
+ *                       threshold, then a syslog message is sent.
+ * Options             :
+ * Notes               : This is an unpolished proof of concept script.
+ *                       Requires Junos 12.2 or newer.
+ *                       Event policy is embedded in the script.
+ */
+
+version 1.1;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns str = "http://exslt.org/strings";
+ns date = "http://exslt.org/dates-and-times";
+ns jumation = "https://www.jumation.com/slaxfunctions";
+
+import "../import/junos.xsl";
+
+
+var $debug = false();
+
+var $event-definition = {
+	<event-options> {
+		<generate-event> {
+			<name> "300s";
+			<time-interval> "300";
+			<no-drift>;
+		}
+		<policy> {
+			<name> "bwutil";
+			<events> "300s";
+			<then> {
+				<event-script> {
+					<name> "bwutil.slax";
+					<junos:comment> "/* WAN IFLs */";
+					<arguments> {
+						<name> "wan1";
+						<value> "ge-0/0/0.0";
+					}
+					<arguments> {
+						<name> "wan2";
+						<value> "ge-0/0/1.0";
+					}
+					<junos:comment> "/* Bandwidth utilization threshold in
+										percentages of port bandwidth */";
+					<arguments> {
+						<name> "threshold";
+						<value> "90";
+					}
+				}
+			}
+		}
+	}
+}
+
+
+function jumation:read-file($con, $filename) {
+
+	var $file-get_rpc = {
+		<file-get> {
+			<filename> $filename;
+			<encoding> "ascii";
+		}
+	}
+	var $file-get_results = jcs:execute($con, $file-get_rpc);
+
+	result $file-get_results;
+}
+
+
+function jumation:write-file($con, $file, $content) {
+
+	var $file-put_rpc = {
+		<file-put> {
+			<filename> $file;
+			<encoding> "ascii";
+			<permission> "0644";
+			<delete-if-exist>;
+			<file-contents> $content;
+		}
+	}
+	var $file-put_results = jcs:execute($con, $file-put_rpc);
+
+	result $file-put_results;
+
+}
+
+
+function jumation:snmpget($con, $object, $ifindex) {
+
+	var $snmpget_rpc = {
+		<get-snmp-object> {
+			<snmp-object-name> $object _ "." _ $ifindex;
+		}
+	}
+	var $snmpget = jcs:execute($con, $snmpget_rpc);
+
+	result $snmpget/snmp-object/object-value;
+
+}
+
+
+function jumation:unix-time($con) {
+
+	var $uptime_rpc = {
+		<get-system-uptime-information>;
+	}
+	var $uptime = jcs:execute($con, $uptime_rpc);
+
+	result $uptime/current-time/date-time/@junos:seconds;
+
+}
+
+
+template exit($slvl, $msg) {
+
+	expr jcs:syslog("external." _ $slvl, $script _ ": ", $msg);
+	terminate;
+
+}
+
+
+match / {
+	<event-script-results> {
+
+		var $con = jcs:open();
+
+		if (not($con)) {
+			call exit($slvl = "error", $msg = "Unable to connect to local mgd");
+		}
+
+		/*
+		 * Create a directory for files which hold previous readings if the
+		 * directory does not already exist.
+		 */
+		var $dir = "/var/tmp/" _ substring-before($script, ".") _ "/";
+
+		var $checkdir_rpc = {
+			<file-list> {
+				<path> $dir;
+			}
+		}
+		var $checkdir = jcs:execute($con, $checkdir_rpc);
+
+		if (not($checkdir/directory/directory-name)) {
+
+			if ($debug) {
+				<output> "mkdir " _ $dir;
+				<output>;
+			}
+
+			var $mkdir_rpc = {
+				<make-directory> {
+					<directory> $dir;
+				}
+			}
+			var $mkdir = jcs:execute($con, $mkdir_rpc);
+		}
+
+		var $event_def := $event-definition;
+		var $limit = $event_def//arguments[name = "threshold"]/value;
+
+		if ($debug) {
+			<output> "threshold: " _ $limit;
+			<output>;
+		}
+
+		for-each( $event_def//arguments[ starts-with(name, "wan") ] ) {
+
+			var $int = value;
+
+			if ($debug) {
+				<output> "processing int: " _ $int;
+				<output>;
+			}
+
+			var $intinfo_rpc = {
+				<get-interface-information> {
+					<interface-name> $int;
+				}
+			}
+			var $intinfo = jcs:execute($con, $intinfo_rpc);
+
+			var $ifindex = $intinfo/logical-interface/snmp-index;
+
+			if ($debug) {
+				<output> "SNMP ifIndex for " _ $int _ ": " _ $ifindex;
+				<output>;
+			}
+
+			var $file = $dir _ "octets_IfIndex" _ $ifindex;
+
+			if ($debug) {
+				<output> "looking for file " _ $file;
+				<output>;
+			}
+
+			var $checkfile_rpc = {
+				<file-list> {
+					<path> $file;
+				}
+			}
+			var $checkfile = jcs:execute($con, $checkfile_rpc);
+
+
+
+			if ($checkfile/directory/file-information/file-name) {
+
+				if ($debug) {
+					<output> $file _ " is present";
+					<output>;
+				}
+
+				var $read_results = jumation:read-file($con, $file);
+
+				if ($read_results//self::xnm:error) {
+					call exit($slvl = "error",
+									$msg = $file _ " file read error");
+				}
+
+				var $readings_ns = str:split(translate(
+							$read_results/file-contents, "\n\r", ""), ",");
+
+				var $last_time = $readings_ns[1];
+				var $last_octin = $readings_ns[2];
+				var $last_octout = $readings_ns[3];
+				var $last_ifspeed = $readings_ns[4];
+
+				if ($debug) {
+					<output> "$last_time: " _ $last_time;
+					<output> "$last_octin: " _ $last_octin;
+					<output> "$last_octout: " _ $last_octout;
+					<output> "$last_ifspeed: " _ $last_ifspeed;
+					<output>;
+				}
+
+				var $time = jumation:unix-time($con);
+				var $octin = jumation:snmpget($con, "ifHCInOctets", $ifindex);
+				var $octout = jumation:snmpget($con, "ifHCOutOctets", $ifindex);
+				var $ifspeed = jumation:snmpget($con, "ifHighSpeed", $ifindex);
+
+
+				if ($debug) {
+					<output> "$time: " _ $time;
+					<output> "$octin: " _ $octin;
+					<output> "$octout: " _ $octout;
+					<output> "$ifspeed: " _ $ifspeed;
+					<output>;
+				}
+
+				var $content =  $time _ "," _ $octin _
+										"," _ $octout _ "," _ $ifspeed;
+				var $write_results = jumation:write-file($con, $file, $content);
+
+
+				if ( $last_ifspeed == $ifspeed ) {
+
+					/*
+					 * Calculate ingress and egress bandwidth for
+					 * check interval.
+					 */
+					var $bps_i = ($octin - $last_octin) * 8 div 1000000 div
+													($time - $last_time);
+					var $bps_o = ($octout - $last_octout) * 8 div 1000000 div
+													($time - $last_time);
+
+					var $bwutil_i = $bps_i * 100 div $ifspeed;
+					var $bwutil_o = $bps_o * 100 div $ifspeed;
+
+					if ($debug) {
+						<output> "$bwutil_i: " _ $bwutil_i;
+						<output> "$bwutil_o: " _ $bwutil_o;
+						<output>;
+					}
+
+					if ( $bwutil_i >= $limit && $bwutil_o >= $limit ) {
+
+						if ($debug) {
+							<output> "incoming and outgoing exceeds on " _ $int;
+							<output>;
+						}
+
+						expr jcs:syslog("external.info", $script _ ": ",
+							"ingress & egress bandwidth utilization exceeds " _
+							$limit _ "% on interface " _ $int);
+					}
+					else if ( $bwutil_i >= $limit ) {
+
+						if ($debug) {
+							<output> "incoming exceeds on " _ $int;
+							<output>;
+						}
+
+						expr jcs:syslog("external.info", $script _ ": ",
+							"ingress bandwidth utilization exceeds " _
+							$limit _ "% on interface " _ $int);
+					}
+					else if ( $bwutil_o >= $limit ) {
+
+						if ($debug) {
+							<output> "outgoing exceeds on " _ $int;
+							<output>;
+						}
+
+						expr jcs:syslog("external.info", $script _ ": ",
+							"egress bandwidth utilization exceeds " _
+							$limit _ "% on interface " _ $int);
+					}
+				}
+
+			}
+			else {
+
+				if ($debug) {
+					<output> $file _ " is not present";
+					<output>;
+				}
+
+				var $time = jumation:unix-time($con);
+				var $octin = jumation:snmpget($con, "ifHCInOctets", $ifindex);
+				var $octout = jumation:snmpget($con, "ifHCOutOctets", $ifindex);
+				var $ifspeed = jumation:snmpget($con, "ifHighSpeed", $ifindex);
+
+				if ($debug) {
+					<output> "$time: " _ $time;
+					<output> "$octin: " _ $octin;
+					<output> "$octout: " _ $octout;
+					<output> "$ifspeed: " _ $ifspeed;
+					<output>;
+				}
+
+				var $content = $time _ "," _ $octin _
+										"," _ $octout _ "," _ $ifspeed;
+				var $write_results = jumation:write-file($con, $file, $content);
+			}
+		}
+		expr jcs:close($con);
+	}
+}
