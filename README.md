@@ -5,7 +5,20 @@
 
 ## Installation
 
-Copy(for example, using [scp](https://en.wikipedia.org/wiki/Secure_copy)) the [bwutil.slax](https://github.com/jumation/bwutil/blob/master/bwutil.slax) to `/var/db/scripts/event/` directory and enable the script file under `[edit event-options event-script]`. In case of two routing engines, the script needs to be copied to the `/var/db/scripts/event/` directory on both routing engines.
+Change the highlighted logical interfaces in text editor to actual WAN/uplink IFLs:
+![bwutil.slax conf](https://github.com/jumation/bwutil/blob/master/bwutil_conf.png)
+
+..or add/remove WAN interfaces like this:
+```
+<arguments> {
+    <name> "wan3";
+    <value> "ge-0/0/7.15";
+}
+```
+Finally, copy(for example, using [scp](https://en.wikipedia.org/wiki/Secure_copy)) the [bwutil.slax](https://github.com/jumation/bwutil/blob/master/bwutil.slax) to `/var/db/scripts/event/` directory and enable the script file under `[edit event-options event-script]`.
+
+
+In case of two routing engines, the script needs to be copied to the `/var/db/scripts/event/` directory on both routing engines.
 
 
 ## License
