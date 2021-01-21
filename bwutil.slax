@@ -1,6 +1,6 @@
 /*
  * Title               : bwutil
- * Last modified date  : 21.02.2021
+ * Last modified date  : 21.01.2021
  * Author              : jumation.com
  * Description         : Compares ingress and egress byte counters for each
  *                       interface specified as a script argument with previous
